@@ -5,7 +5,7 @@ type PitchTrackerType = {
   prepare(): any;
   start(): any;
   stop(): any;
-  noteOn(callback: (midiNum: any) => any): any;
+  noteOn(callback: (notes: any) => any): any;
   noteOff(callback: (midiNum: any) => any): any;
 };
 

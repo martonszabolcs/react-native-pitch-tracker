@@ -1,9 +1,10 @@
 //
 //  ModelDataHandler.swift
-//  Banju
+//  flutter_piano_audio_detection
 //
-//  Created by 김성환 on 2020/08/10.
+//  Created by WonyJeong on 2021/07/06.
 //
+import Foundation
 import TensorFlowLite
 import UIKit
 
@@ -17,19 +18,16 @@ typealias FileInfo = (name: String, extension: String)
 
 /// Information about the ConvActions model.
 enum ConvActions {
-    static let modelInfo: FileInfo = (name: "onsets_frames_wavinput_uni", extension: "tflite")
+    static let modelInfo: FileInfo = (name: "onsets_frames_wavinput", extension: "tflite")
 }
-
 
 /// This class handles all data preprocessing and makes calls to run inference on a given audio
 /// buffer by invoking the TensorFlow Lite `Interpreter`. It then formats the inferences obtained
 /// and averages the recognized commands by running them through RecognizeCommands.
 class ModelDataHandler {
-
     // MARK: - Internal Properties
     /// The current thread count used by the TensorFlow Lite Interpreter.
     let threadCount: Int
-
     let threadCountLimit = 10
     let sampleRate = 16000
     let sequenceLength = 1120
@@ -46,7 +44,6 @@ class ModelDataHandler {
     /// labels files are successfully loaded from the app's main bundle. Default `threadCount` is 1.
     init?(modelFileInfo: FileInfo, threadCount: Int = 1) {
         let modelFilename = modelFileInfo.name
-
         // Construct the path to the model file.
         guard let modelPath = Bundle.main.path(
         forResource: modelFilename,
@@ -60,6 +57,7 @@ class ModelDataHandler {
         self.threadCount = threadCount
         var options = Interpreter.Options()
         options.threadCount = threadCount
+        
         do {
         // Create the `Interpreter`.
         interpreter = try Interpreter(modelPath: modelPath, options: options)
@@ -73,9 +71,13 @@ class ModelDataHandler {
 
     // MARK: - Internal Methods
     /// Invokes the `Interpreter` and processes and returns the inference results.
-    func runModel(onBuffer buffer: [Int16]) -> [Int]? {
+    func runModel(onBuffer buffer: [Int16]) -> [Dictionary<String, Any>]? {
         let interval: TimeInterval
-        let outputTensor: Tensor
+        let outputFrame: Tensor
+        let outputOnset: Tensor
+        let outputOffset: Tensor
+        let outputVelocity: Tensor
+        
         do {
             // Copy the `[Int16]` buffer data as an array of `Float`s to the audio buffer input `Tensor`'s.
             let audioBufferData = Data(copyingBufferOf: buffer.map { Float($0) / maxInt16AsFloat32 })
@@ -87,24 +89,40 @@ class ModelDataHandler {
             interval = Date().timeIntervalSince(startDate) * 1000
 
             // Get the output `Tensor` to process the inference results.
-            outputTensor = try interpreter.output(at: 0)
+            outputFrame = try interpreter.output(at: 0)
+            outputOnset = try interpreter.output(at: 1)
+            outputOffset = try interpreter.output(at: 2)
+            outputVelocity = try interpreter.output(at: 3)
         } catch let error {
             print("Failed to invoke the interpreter with error: \(error.localizedDescription)")
             return nil
         }
-
-        // Gets the formatted and averaged results.
-        let result = [Float32](unsafeData: outputTensor.data) ?? []
-        var keys = Array(repeating: 0, count: 88)
+        
+        // Array length is 32*88
+        let frames : [Float32] = [Float32](unsafeData: outputFrame.data) ?? []
+        let onsets : [Float32] = [Float32](unsafeData: outputOnset.data) ?? []
+        let offsets : [Float32] = [Float32](unsafeData: outputOffset.data) ?? []
+        let velocities : [Float32] = [Float32](unsafeData: outputVelocity.data) ?? []
+        
+        var result : [Dictionary<String, Any>] = []
+        
         for i in 0...31 {
-            var offset = i*88
+            let offset = i * 88
             for j in 0...87 {
-                if(result[offset+j]>0) {
-                    keys[j] += 1
+                let idx = offset + j
+                if(frames[idx] > 0 || onsets[idx] > 0) {
+                    let dic : Dictionary<String, Any> = [
+                        "key" : j,
+                        "frame" : frames[idx],
+                        "onset" : onsets[idx],
+                        "offset" : offsets[idx],
+                        "velocity" : velocities[idx]
+                    ]
+                    result.append(dic)
                 }
             }
         }
-        return keys
+        return result
     }
 }
 

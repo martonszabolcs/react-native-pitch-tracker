@@ -10,7 +10,7 @@ class PitchTracker: RCTEventEmitter {
     private var audioInputManager: AudioInputManager?
     
     // MARK: Instance Variables
-    private var result: [Int]?
+    private var result : [Dictionary<String, Any>]?
     private var prevKeys: [Int] = Array(repeating: 0, count: 88)
     private var bufferSize: Int = 0
     private var threshold: Int = 10
@@ -55,14 +55,10 @@ class PitchTracker: RCTEventEmitter {
     }
 
     private func runModel(onBuffer buffer: [Int16]) {
-        result = modelDataHandler?.runModel(onBuffer: buffer)
-        guard var nowKeys = result else {
-            return
-        }
-        for i in 0...87 {
-            if(nowKeys[i] > 4) {
-                sendEvent(withName: "NoteOn", body: ["midiNum": i+21])
-            }
+        self.result = modelDataHandler?.runModel(onBuffer: buffer)
+        guard let eventList = result else { return }
+        if (!eventList.isEmpty){
+            sendEvent(withName: "NoteOn", body: ["midiNum": eventList])
         }
     }    
 
