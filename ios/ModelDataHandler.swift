@@ -31,14 +31,14 @@ class ModelDataHandler {
     let threadCountLimit = 10
     let sampleRate = 16000
     let sequenceLength = 1120
-
+    
     // MARK: - Private Properties
     private var buffer:[Int] = []
     private let maxInt16AsFloat32: Float32 = 32767.0
-
+    
     /// TensorFlow Lite `Interpreter` object for performing inference on a given model.
     private var interpreter: Interpreter
-
+    
     // MARK: - Initialization
     /// A failable initializer for `ModelDataHandler`. A new instance is created if the model and
     /// labels files are successfully loaded from the app's main bundle. Default `threadCount` is 1.
@@ -46,28 +46,106 @@ class ModelDataHandler {
         let modelFilename = modelFileInfo.name
         // Construct the path to the model file.
         guard let modelPath = Bundle.main.path(
-        forResource: modelFilename,
-        ofType: modelFileInfo.extension
+            forResource: modelFilename,
+            ofType: modelFileInfo.extension
         ) else {
-        print("Failed to load the model file with name: \(modelFilename).")
+            print("Failed to load the model file with name: \(modelFilename).")
             return nil
         }
-
+        
         // Specify the options for the `Interpreter`.
         self.threadCount = threadCount
         var options = Interpreter.Options()
         options.threadCount = threadCount
         
         do {
-        // Create the `Interpreter`.
-        interpreter = try Interpreter(modelPath: modelPath, options: options)
-        // Allocate memory for the model's input `Tensor`s.
-        try interpreter.allocateTensors()
+            // Create the `Interpreter`.
+            interpreter = try Interpreter(modelPath: modelPath, options: options)
+            // Allocate memory for the model's input `Tensor`s.
+            try interpreter.allocateTensors()
         } catch let error {
             print("Failed to create the interpreter with error: \(error.localizedDescription)")
             return nil
         }
     }
+    
+    ///
+    //PATRIK
+    ///
+    
+    // SHAPE OF AN ARRAY - CAN BE REDUNDANT
+    func shapeOf(inArray: Array<Array<[Float]>>) -> [Int] {
+        return [inArray.count, inArray[0].count, inArray[0][0].count]
+    }
+    
+    //THRESHOLD MATRIX (RETURNS INT8)
+    func thresholdMatrix(matrix: Array<Array<[Float]>>, threshold: Float, shape: [Int]) -> Array<Array<[Int]>> {
+        
+        var outArray = [[[Int]]](repeating:
+                                    [[Int]](repeating:
+                                                [Int](repeating: 0, count: shape[2]),
+                                            count: shape[1]),
+                                 count: shape[0])
+        
+        var count = 0
+
+        for x in 0..<shape[1] {
+            for y in matrix[0][x].indices {
+                let element = matrix[0][x][y]
+                if element > threshold{
+                    outArray[0][x][y] = 1
+                    count += 1
+                }
+            }
+        }
+        
+        if count > 0 { return outArray }
+        else { return [[[]]] }
+    }
+    
+    //BITWISE OR OPERATOR
+    func bitwiseOR(matrix1: Array<Array<[Int]>>, matrix2: Array<Array<[Int]>>, shape: [Int]) -> Array<Array<[Int]>> {
+
+        var outArray = [[[Int]]](repeating:
+                                    [[Int]](repeating:
+                                                [Int](repeating: 0, count: shape[2]),
+                                            count: shape[1]),
+                                 count: shape[0])
+
+        for x in 0..<shape[1]{
+            for y in matrix1[0][x].indices {
+                let element1 = matrix1[0][x][y]
+                let element2 = matrix2[0][x][y]
+
+                outArray[0][x][y] =  (element1.boolValue || element2.boolValue).intValue
+            }
+        }
+        return outArray
+    }
+    
+    func convertToArray(tensor: Tensor) -> Array<Array<[Float]>>{
+        let tensorShape = tensor.shape.dimensions
+        let tensorData = tensor.data
+        let multiDimArray: [[[Float]]] = tensorData.withUnsafeBytes { buffer in
+            let pointer = buffer.baseAddress!.assumingMemoryBound(to: Float.self)
+            let elements = tensor.shape.dimensions.reduce(1, *)
+            var result = [[[Float]]](repeating: [], count: tensorShape[0])
+            
+            for i in 0..<tensorShape[0] {
+                result[i] = (0..<tensorShape[1]).map { r in
+                    (0..<tensorShape[2]).map { c in
+                        pointer[i * elements + r * tensorShape[2] + c]
+                    }
+                }
+            }
+            return result
+        }
+        return multiDimArray
+    }
+    
+    var intervals: [Int: Int] = [:]
+    
+    var pitchList: [Int] = []
 
     // MARK: - Internal Methods
     /// Invokes the `Interpreter` and processes and returns the inference results.
@@ -98,31 +176,114 @@ class ModelDataHandler {
             return nil
         }
         
-        // Array length is 32*88
-        let frames : [Float32] = [Float32](unsafeData: outputFrame.data) ?? []
-        let onsets : [Float32] = [Float32](unsafeData: outputOnset.data) ?? []
-        let offsets : [Float32] = [Float32](unsafeData: outputOffset.data) ?? []
-        let velocities : [Float32] = [Float32](unsafeData: outputVelocity.data) ?? []
+        //PATRIK
+        pitchList = []
+        
+        //print("INTERVALS")
+        //print(intervals)
+        
+        let threshold: Float = 0.93
+        let frameLenSecs: Float = 0.032
+        
+        let _onsets = convertToArray(tensor: outputOnset)
+        let _frames = convertToArray(tensor: outputFrame)
+        let shape  = shapeOf(inArray: _onsets)
+        
+        
+        let onsetsThreshold = thresholdMatrix(matrix: _onsets, threshold: threshold, shape: shape)
+        let framesThreshold = thresholdMatrix(matrix: _frames, threshold: threshold, shape: shape)
+        
+        var framesBW : Array<Array<[Int]>> = [[[]]]
+        if (!onsetsThreshold[0][0].isEmpty && !framesThreshold[0][0].isEmpty) {
+            framesBW =  bitwiseOR(matrix1: onsetsThreshold, matrix2: framesThreshold, shape: shape)
+        }
         
         var result : [Dictionary<String, Any>] = []
-        
-        for i in 0...31 {
-            let offset = i * 88
-            for j in 0...87 {
-                let idx = offset + j
-                if(frames[idx] > 0 || onsets[idx] > 0) {
-                    let dic : Dictionary<String, Any> = [
-                        "key" : j,
-                        "frame" : frames[idx],
-                        "onset" : onsets[idx],
-                        "offset" : offsets[idx],
-                        "velocity" : velocities[idx]
+        func endPitch(pitch: Int, endFrame: Int) {
+            
+            let _pitch = pitch + 21
+            
+            let note: [String: Any] =
+                    ["velocity": 80,
+                    "key": _pitch,
+                    "onset": (Float(intervals[pitch]!) * (frameLenSecs)),
+                    "offset": (Float(endFrame) * frameLenSecs)
                     ]
-                    result.append(dic)
+            //print("NEWNOTES")
+            //print(note)
+                
+            intervals.removeValue(forKey: pitch)
+            
+            //itt nezi meg h volt-e mar a hang, ha nem volt akkor adja csak ki
+            if !pitchList.contains(_pitch) {
+                result.append(note)
+                pitchList.append(pitch)
+            }
+            
+            
+        }
+        
+        let paddedFrames = framesBW[0]
+
+        for (i, frame) in paddedFrames.enumerated(){
+            for (pitch, active) in frame.enumerated(){
+
+                if (active == 1) {
+
+                    if (intervals[pitch] == nil) {
+                        if (onsetsThreshold.isEmpty) {
+                            intervals[pitch] = i
+                            
+                        }
+                        else if (onsetsThreshold[0][i][pitch] == 1) {
+                            intervals[pitch] = i
+                            
+                        }
+                    }
+
+                    //else if (!onsetsThreshold.isEmpty || onsetsThreshold.count > 2 || onsetsThreshold[0].count > 1 || (onsetsThreshold[0][i-1][pitch] != 0)) {
+
+                      //  if (onsetsThreshold[0][i][pitch] == 1 && onsetsThreshold[0][i - 1][pitch] == 0) {
+                        //    endPitch(pitch: pitch, endFrame: i)
+                        //    intervals[pitch] = i
+                        //}
+                    //}
                 }
+                else if (intervals[pitch] != nil){ endPitch(pitch: pitch, endFrame: i) }
             }
         }
+        
         return result
+
+        
+        //
+        //REGI KOD
+        //
+        
+        // Array length is 32*88
+        //let frames : [Float32] = [Float32](unsafeData: outputFrame.data) ?? []
+        //let onsets : [Float32] = [Float32](unsafeData: outputOnset.data) ?? []
+        //let offsets : [Float32] = [Float32](unsafeData: outputOffset.data) ?? []
+        //let velocities : [Float32] = [Float32](unsafeData: outputVelocity.data) ?? []
+        
+        //var result : [Dictionary<String, Any>] = []
+        //for i in 0...31 {
+        //   let offset = i * 88
+        //    for j in 0...87 {
+        //       let idx = offset + j
+        //        if(frames[idx] > 0 || onsets[idx] > 0) {
+        //           let dic : Dictionary<String, Any> = [
+        //                "key" : j,
+        //                "frame" : frames[idx],
+        //                "onset" : onsets[idx],
+        //                "offset" : offsets[idx],
+        //                "velocity" : velocities[idx]
+        //            ]
+        //            result.append(dic)
+        //        }
+        //    }
+        //}
+        //return result
     }
 }
 
@@ -160,5 +321,20 @@ extension Array {
         ))
         }
         #endif  // swift(>=5.0)
+    }
+}
+
+//PATRIK
+
+// Bool -> Int
+extension Bool {
+    var intValue: Int {
+        return self ? 1 : 0
+    }
+}
+// Int -> Bool
+extension Int {
+    var boolValue: Bool {
+        return self != 0
     }
 }
